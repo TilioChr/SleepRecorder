@@ -1,5 +1,3 @@
-/* Mobile-first — Sleep Recorder (clean & responsive vertical) */
-
 :root {
   --bg: #0b1020;
   --card: #111a33;
@@ -42,7 +40,6 @@ body {
   background-attachment: fixed;
 }
 
-/* iOS/Android: background-attachment: fixed peut glitcher/janker */
 @media (max-width: 900px) {
   body {
     background-attachment: scroll;
@@ -59,7 +56,6 @@ button {
   cursor: pointer;
 }
 
-/* Layout */
 .app {
   min-height: 100%;
   max-width: 980px;
@@ -70,7 +66,6 @@ button {
   gap: 12px;
 }
 
-/* Header */
 .topbar {
   display: flex;
   justify-content: space-between;
@@ -123,7 +118,6 @@ button {
   font-size: 18px;
 }
 
-/* Card */
 .card {
   background: rgba(17, 26, 51, 0.92);
   border: 1px solid rgba(34, 48, 90, 0.85);
@@ -137,7 +131,6 @@ button {
   padding: 12px 12px 10px;
 }
 
-/* Main: mobile = pile naturelle (pas 2 panneaux forcés à mi-hauteur) */
 .main {
   flex: 1 1 auto;
   min-height: 0;
@@ -147,7 +140,6 @@ button {
   gap: 12px;
 }
 
-/* Desktop: 2 colonnes, même hauteur, scroll interne */
 @media (min-width: 900px) {
   .main {
     grid-template-columns: 1.05fr 0.95fr;
@@ -155,14 +147,12 @@ button {
   }
 }
 
-/* Panel cards must allow inner scroll (desktop) */
 .card--panel {
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
-/* Mobile tweaks */
 @media (max-width: 899px) {
   .card--panel {
     min-height: auto;
@@ -203,7 +193,6 @@ button {
   font-size: 12px;
 }
 
-/* Chips */
 .chips {
   display: flex;
   gap: 8px;
@@ -229,7 +218,6 @@ button {
   background: rgba(106, 163, 255, 0.18);
 }
 
-/* List (scrollable) */
 .list {
   flex: 1 1 auto;
   min-height: 0;
@@ -237,7 +225,7 @@ button {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding-right: 2px; /* évite scrollbar qui colle */
+  padding-right: 2px;
 }
 
 .daysep {
@@ -304,7 +292,6 @@ button {
   background: rgba(147, 164, 203, 0.12);
 }
 
-/* Player */
 .player {
   display: flex;
   flex-direction: column;
@@ -336,7 +323,6 @@ button {
   margin: 2px 0;
 }
 
-/* Form */
 .field {
   display: flex;
   flex-direction: column;
@@ -383,7 +369,6 @@ button {
   font-size: 12px;
 }
 
-/* Buttons */
 .btn {
   height: var(--tap);
   border-radius: 14px;
@@ -413,7 +398,6 @@ button {
   margin-top: 2px;
 }
 
-/* Empty state */
 .empty {
   margin-top: 8px;
   padding: 12px;
@@ -424,7 +408,7 @@ button {
 }
 
 /* -------------------------------------------------------------------------- */
-/* WavePlayer (WaveSurfer) — responsive & safe on mobile                       */
+/* WavePlayer */
 /* -------------------------------------------------------------------------- */
 
 .wavewrap {
@@ -461,7 +445,6 @@ button {
   width: 100%;
 }
 
-/* Très petits écrans: play/pause en 1 ligne + actions dessous */
 @media (max-width: 360px) {
   .player-actions {
     grid-template-columns: 1fr 1fr;
@@ -471,7 +454,6 @@ button {
   }
 }
 
-/* Anti débordement horizontal (noms longs + canvas wavesurfer) */
 .card,
 .card * {
   max-width: 100%;
@@ -483,25 +465,21 @@ button {
   }
 }
 
-/* Empêche la page entière de dépasser */
 html,
 body {
   width: 100%;
   overflow-x: hidden;
 }
 
-/* Même protection côté root React */
 #root {
   width: 100%;
   overflow-x: hidden;
 }
 
-/* En CSS Grid, les enfants ont min-width:auto => peuvent déborder */
 .main > * {
   min-width: 0;
 }
 
-/* Blinde les contenus "à risque" (WaveSurfer utilise canvas) */
 img,
 svg,
 canvas {
@@ -509,7 +487,6 @@ canvas {
   display: block;
 }
 
-/* Optionnel mais utile: évite les glitches d'overscroll horizontal */
 .chips {
   overscroll-behavior-x: contain;
 }
