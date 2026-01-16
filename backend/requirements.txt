@@ -1,4 +1,6 @@
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
 numpy==2.2.1
+setuptools==75.6.0
+wheel==0.45.1
 webrtcvad==2.0.10
