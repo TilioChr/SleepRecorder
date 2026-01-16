@@ -2,13 +2,8 @@ fastapi==0.115.6
 uvicorn[standard]==0.32.1
 numpy==2.2.1
 
-# needed by webrtcvad (pkg_resources)
 setuptools==75.6.0
 wheel==0.45.1
 
-# VAD + audio tagging pretrained
 webrtcvad==2.0.10
 panns-inference==0.1.1
-
-# torch CPU (pip install will grab the compatible wheel)
-torch==2.5.1
