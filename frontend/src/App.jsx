@@ -17,6 +17,12 @@ import WavePlayer from "./WavePlayer.jsx";
 
 const TAGS = ["Tous", "Non tagué", "Parole", "Ronflement", "Bruit"];
 
+function statusClass(s) {
+  if (s === "done") return "dot--done";
+  if (s === "processing") return "dot--processing";
+  return "dot--pending";
+}
+
 function safeNameHint(name) {
   return (name || "").replace(/\s+/g, "_");
 }
@@ -237,8 +243,27 @@ export default function App() {
                       <div className="item-sub">{fmtBytes(f.size)}</div>
                     </div>
 
-                    <div className={`badge ${f.tag ? "" : "badge--muted"}`}>
-                      {f.tag || "Non tagué"}
+                    <div className="item-right">
+                      <span
+                        className={`dot ${statusClass(f.analysis_status)}`}
+                        title={
+                          f.analysis_status === "done"
+                            ? "Traité"
+                            : f.analysis_status === "processing"
+                            ? "Traitement en cours"
+                            : "Pas encore traité"
+                        }
+                        aria-label={
+                          f.analysis_status === "done"
+                            ? "Traité"
+                            : f.analysis_status === "processing"
+                            ? "Traitement en cours"
+                            : "Pas encore traité"
+                        }
+                      />
+                      <div className={`badge ${f.tag ? "" : "badge--muted"}`}>
+                        {f.tag || "Non tagué"}
+                      </div>
                     </div>
                   </button>
                 ))}
@@ -331,5 +356,3 @@ export default function App() {
     </div>
   );
 }
-
-

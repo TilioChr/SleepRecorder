@@ -1,6 +1,6 @@
+import json
 import os
 import re
-import json
 import socket
 import threading
 import time
@@ -14,13 +14,19 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
 
+from .audio_analysis import analyze_wav_file
 from .settings import (
-    AUDIO_TCP_HOST, AUDIO_TCP_PORT,
-    API_HOST, API_PORT,
+    AUDIO_TCP_HOST,
+    AUDIO_TCP_PORT,
+    API_HOST,
+    API_PORT,
     RECORDINGS_DIR,
-    SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH_BYTES,
-    CHUNK_SECONDS
+    SAMPLE_RATE,
+    CHANNELS,
+    SAMPLE_WIDTH_BYTES,
+    CHUNK_SECONDS,
 )
+
 
 # -------------------------
 # Paths / persistence
@@ -56,10 +62,7 @@ def _check_name(name: str) -> None:
 
 
 def _parse_dt_from_name(name: str):
-    """
-    Expected filename prefix: YYYYMMDD-HHMMSS...
-    Returns: ("YYYY-MM-DD", "HH:MM:SS") or (None, None)
-    """
+    """Expected filename prefix: YYYYMMDD-HHMMSS..."""
     m = re.match(r"^(\d{8})-(\d{6})", name)
     if not m:
         return None, None
@@ -70,10 +73,6 @@ def _parse_dt_from_name(name: str):
 
 
 def _ts_from_date_time(date_str: str, time_str: str) -> int | None:
-    """
-    Convertit ("YYYY-MM-DD", "HH:MM:SS") en timestamp Unix (secondes).
-    Interprété en heure locale (naïf), cohérent avec datetime.now() utilisé pour nommer.
-    """
     try:
         dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
         return int(dt.timestamp())
@@ -84,6 +83,25 @@ def _ts_from_date_time(date_str: str, time_str: str) -> int | None:
 def _date_time_from_ts(ts: int):
     dt = datetime.fromtimestamp(int(ts))
     return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M:%S")
+
+
+def _ensure_defaults(meta: dict, filename: str, file_mtime: int | None = None) -> dict:
+    """Garantit que les champs existent, sans écraser l'existant."""
+    meta.setdefault(filename, {})
+    meta[filename].setdefault("tag", "Non tagué")
+    if "recorded_at" not in meta[filename]:
+        # on essaye d'inférer recorded_at depuis le nom, sinon fallback sur mtime
+        d, t = _parse_dt_from_name(filename)
+        ts = _ts_from_date_time(d, t) if (d and t) else None
+        if ts is None:
+            ts = int(file_mtime if file_mtime is not None else time.time())
+        meta[filename]["recorded_at"] = int(ts)
+    # état du traitement VAD/classif
+    meta[filename].setdefault("analysis_status", "pending")  # pending | processing | done
+    meta[filename].setdefault("analysis_kind", None)  # silence | voice | snore | noise
+    meta[filename].setdefault("analysis_confidence", None)
+    meta[filename].setdefault("analysis_has_activity", None)
+    return meta[filename]
 
 
 # -------------------------
@@ -98,7 +116,6 @@ def now_id():
 
 
 def write_wav(path: Path, pcm_bytes: bytes, recorded_at: int | None = None):
-    # ensure parent exists
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with wave.open(str(path), "wb") as wf:
@@ -107,11 +124,12 @@ def write_wav(path: Path, pcm_bytes: bytes, recorded_at: int | None = None):
         wf.setframerate(SAMPLE_RATE)
         wf.writeframes(pcm_bytes)
 
-    # Persist une date/heure stable dans meta.json, indépendante du nom de fichier
+    # initialiser meta + marquer comme à traiter
     meta = _load_meta()
-    meta.setdefault(path.name, {})
-    meta[path.name].setdefault("tag", "Non tagué")
-    meta[path.name].setdefault("recorded_at", int(recorded_at if recorded_at is not None else time.time()))
+    _ensure_defaults(meta, path.name, file_mtime=int(path.stat().st_mtime))
+    if recorded_at is not None:
+        meta[path.name]["recorded_at"] = int(recorded_at)
+    meta[path.name]["analysis_status"] = "pending"
     _save_meta(meta)
 
 
@@ -126,9 +144,7 @@ def list_wavs():
         entries = []
 
     for p in entries:
-        if not p.is_file():
-            continue
-        if p.suffix.lower() != ".wav":
+        if not p.is_file() or p.suffix.lower() != ".wav":
             continue
 
         try:
@@ -136,49 +152,44 @@ def list_wavs():
         except FileNotFoundError:
             continue
 
-        entry_meta = meta.get(p.name) or {}
-        tag = entry_meta.get("tag", "Non tagué")
-        recorded_at = entry_meta.get("recorded_at")
-
-        # 1) Si on a un nom avec date/heure et pas recorded_at, on migre une fois
-        name_date, name_time = _parse_dt_from_name(p.name)
-        if recorded_at is None and name_date and name_time:
-            ts = _ts_from_date_time(name_date, name_time)
-            if ts is not None:
-                meta.setdefault(p.name, {})
-                meta[p.name]["recorded_at"] = ts
-                recorded_at = ts
-                meta_dirty = True
-
-        # 2) Si toujours pas de recorded_at, fallback sur mtime (meilleur possible)
-        if recorded_at is None:
-            recorded_at = int(st.st_mtime)
-            meta.setdefault(p.name, {})
-            meta[p.name].setdefault("recorded_at", recorded_at)
+        m = meta.get(p.name)
+        if m is None:
+            _ensure_defaults(meta, p.name, file_mtime=int(st.st_mtime))
             meta_dirty = True
+            m = meta[p.name]
+        else:
+            before = dict(m)
+            _ensure_defaults(meta, p.name, file_mtime=int(st.st_mtime))
+            if meta[p.name] != before:
+                meta_dirty = True
+            m = meta[p.name]
 
-        # 3) date/time affichés:
-        #    - si le nom est parseable, on garde l'affichage depuis le nom
-        #    - sinon, on affiche recorded_at (stable)
+        recorded_at = int(m.get("recorded_at") or st.st_mtime)
+        name_date, name_time = _parse_dt_from_name(p.name)
         if name_date and name_time:
             date_str, time_str = name_date, name_time
         else:
             date_str, time_str = _date_time_from_ts(recorded_at)
 
-        out.append({
-            "name": p.name,
-            "size": st.st_size,
-            "mtime": int(st.st_mtime),
-            "date": date_str,
-            "time": time_str,
-            "tag": tag,
-            "url": f"/recordings/{p.name}",
-        })
+        out.append(
+            {
+                "name": p.name,
+                "size": st.st_size,
+                "mtime": int(st.st_mtime),
+                "date": date_str,
+                "time": time_str,
+                "tag": m.get("tag", "Non tagué"),
+                "url": f"/recordings/{p.name}",
+                "analysis_status": m.get("analysis_status", "pending"),
+                "analysis_kind": m.get("analysis_kind"),
+                "analysis_confidence": m.get("analysis_confidence"),
+                "analysis_has_activity": m.get("analysis_has_activity"),
+            }
+        )
 
     if meta_dirty:
         _save_meta(meta)
 
-    # most recent first
     out.sort(key=lambda x: x["mtime"], reverse=True)
     return out
 
@@ -213,15 +224,11 @@ def api_rename(name: str, body: RenameBody):
 
     meta = _load_meta()
 
-    # Déplacer la meta si elle existe
     if name in meta:
         meta[body.new_name] = meta.pop(name)
 
-    # Assurer recorded_at même pour d'anciens fichiers (ou si pas de meta)
-    meta.setdefault(body.new_name, {})
-    meta[body.new_name].setdefault("tag", "Non tagué")
-    meta[body.new_name].setdefault("recorded_at", int(dst.stat().st_mtime))
-
+    # garantir la présence des champs pour le nouveau nom
+    _ensure_defaults(meta, body.new_name, file_mtime=int(dst.stat().st_mtime))
     _save_meta(meta)
 
     return {"ok": True, "name": body.new_name}
@@ -254,8 +261,7 @@ def api_tag(name: str, body: TagBody):
         raise HTTPException(status_code=404, detail="Fichier introuvable")
 
     meta = _load_meta()
-    meta.setdefault(name, {})
-    meta[name].setdefault("recorded_at", int(p.stat().st_mtime))
+    _ensure_defaults(meta, name, file_mtime=int(p.stat().st_mtime))
     meta[name]["tag"] = body.tag
     _save_meta(meta)
 
@@ -267,8 +273,91 @@ app.mount("/recordings", StaticFiles(directory=str(REC_DIR)), name="recordings")
 
 
 # -------------------------
+# Background analysis worker
+# -------------------------
+
+_analysis_lock = threading.Lock()
+
+
+def _auto_tag_from_kind(kind: str | None) -> str | None:
+    if kind == "voice":
+        return "Parole"
+    if kind == "snore":
+        return "Ronflement"
+    if kind == "noise":
+        return "Bruit"
+    return None
+
+
+def analysis_worker():
+    """Traite chaque .wav une seule fois (analysis_status: pending->processing->done)."""
+    print("[ANALYSIS] worker started")
+    while True:
+        try:
+            to_process = None
+
+            with _analysis_lock:
+                meta = _load_meta()
+
+                try:
+                    wavs = [p for p in REC_DIR.iterdir() if p.is_file() and p.suffix.lower() == ".wav"]
+                except FileNotFoundError:
+                    wavs = []
+
+                for p in sorted(wavs, key=lambda x: x.stat().st_mtime):
+                    st = p.stat()
+                    _ensure_defaults(meta, p.name, file_mtime=int(st.st_mtime))
+                    if meta[p.name].get("analysis_status") == "pending":
+                        meta[p.name]["analysis_status"] = "processing"
+                        _save_meta(meta)
+                        to_process = p
+                        break
+
+            if to_process is None:
+                time.sleep(1.0)
+                continue
+
+            try:
+                res = analyze_wav_file(str(to_process))
+            except Exception as e:
+                with _analysis_lock:
+                    meta = _load_meta()
+                    if to_process.name in meta:
+                        meta[to_process.name]["analysis_status"] = "pending"
+                        meta[to_process.name]["analysis_kind"] = None
+                        meta[to_process.name]["analysis_confidence"] = None
+                        meta[to_process.name]["analysis_has_activity"] = None
+                        _save_meta(meta)
+                print(f"[ANALYSIS] error on {to_process.name}: {e}")
+                time.sleep(0.5)
+                continue
+
+            with _analysis_lock:
+                meta = _load_meta()
+                if to_process.name not in meta:
+                    continue
+
+                meta[to_process.name]["analysis_status"] = "done"
+                meta[to_process.name]["analysis_kind"] = res.kind
+                meta[to_process.name]["analysis_confidence"] = float(res.confidence)
+                meta[to_process.name]["analysis_has_activity"] = bool(res.has_activity)
+
+                current_tag = meta[to_process.name].get("tag") or "Non tagué"
+                auto = _auto_tag_from_kind(res.kind)
+                if auto and current_tag == "Non tagué":
+                    meta[to_process.name]["tag"] = auto
+
+                _save_meta(meta)
+
+        except Exception as e:
+            print(f"[ANALYSIS] worker loop error: {e}")
+            time.sleep(1.0)
+
+
+# -------------------------
 # Audio TCP server
 # -------------------------
+
 
 def audio_tcp_server():
     print(f"[AUDIO] listening on {AUDIO_TCP_HOST}:{AUDIO_TCP_PORT}")
@@ -325,8 +414,12 @@ def audio_tcp_server():
 
 
 def main():
-    t = threading.Thread(target=audio_tcp_server, daemon=True)
-    t.start()
+    t_audio = threading.Thread(target=audio_tcp_server, daemon=True)
+    t_audio.start()
+
+    t_analysis = threading.Thread(target=analysis_worker, daemon=True)
+    t_analysis.start()
+
     uvicorn.run(app, host=API_HOST, port=API_PORT)
 
 
