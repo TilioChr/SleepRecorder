@@ -1,4 +1,5 @@
-/* Mobile-first POC UI — Sleep Recorder */
+/* Mobile-first — Sleep Recorder (clean & responsive vertical) */
+
 :root {
   --bg: #0b1020;
   --card: #111a33;
@@ -7,7 +8,6 @@
   --line: #22305a;
   --accent: #6aa3ff;
   --accent2: #a78bfa;
-  --snore: #34d399;
   --danger: #ff5c74;
 
   --radius: 18px;
@@ -18,13 +18,16 @@
 * {
   box-sizing: border-box;
 }
+
 html,
 body {
   height: 100%;
 }
+
 body {
   margin: 0;
   font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial;
+  color: var(--text);
   background: radial-gradient(
       1200px 800px at 20% -10%,
       rgba(106, 163, 255, 0.18),
@@ -37,30 +40,42 @@ body {
     ),
     var(--bg);
   background-attachment: fixed;
-  color: var(--text);
 }
 
+/* iOS/Android: background-attachment: fixed peut glitcher/janker */
+@media (max-width: 900px) {
+  body {
+    background-attachment: scroll;
+  }
+}
+
+button,
+select,
+input {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button {
+  cursor: pointer;
+}
+
+/* Layout */
 .app {
   min-height: 100%;
-  padding: 14px 14px calc(14px + 72px); /* space for bottom nav */
-  max-width: 680px;
+  max-width: 980px;
   margin: 0 auto;
+  padding: 12px 12px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
-.card {
-  background: rgba(17, 26, 51, 0.92);
-  border: 1px solid rgba(34, 48, 90, 0.85);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  backdrop-filter: blur(8px);
-  padding: 14px;
-}
-
+/* Header */
 .topbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 8px 2px 12px;
+  gap: 12px;
 }
 
 .brand {
@@ -108,15 +123,224 @@ body {
   font-size: 18px;
 }
 
-.controls {
-  margin-bottom: 12px;
+/* Card */
+.card {
+  background: rgba(17, 26, 51, 0.92);
+  border: 1px solid rgba(34, 48, 90, 0.85);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(8px);
+  padding: 14px;
 }
-.row {
+
+.controls {
+  padding: 12px 12px 10px;
+}
+
+/* Main: mobile = pile naturelle (pas 2 panneaux forcés à mi-hauteur) */
+.main {
+  flex: 1 1 auto;
+  min-height: 0;
   display: grid;
-  grid-template-columns: 56px 1fr;
+  grid-template-columns: 1fr;
+  grid-template-rows: auto auto;
+  gap: 12px;
+}
+
+/* Desktop: 2 colonnes, même hauteur, scroll interne */
+@media (min-width: 900px) {
+  .main {
+    grid-template-columns: 1.05fr 0.95fr;
+    grid-template-rows: minmax(0, 1fr);
+  }
+}
+
+/* Panel cards must allow inner scroll (desktop) */
+.card--panel {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Mobile tweaks */
+@media (max-width: 899px) {
+  .card--panel {
+    min-height: auto;
+  }
+  .list {
+    max-height: 46dvh;
+  }
+}
+
+.sectionhead {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
   gap: 10px;
-  align-items: center;
   margin-bottom: 10px;
+}
+
+.sectionhead h2 {
+  margin: 0;
+  font-size: 14px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  color: rgba(231, 239, 255, 0.92);
+}
+
+.meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.alert {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 92, 116, 0.45);
+  background: rgba(255, 92, 116, 0.12);
+  color: rgba(231, 239, 255, 0.95);
+  font-size: 12px;
+}
+
+/* Chips */
+.chips {
+  display: flex;
+  gap: 8px;
+  overflow: auto;
+  padding-bottom: 2px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.chip {
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(34, 48, 90, 0.9);
+  background: rgba(15, 23, 48, 0.75);
+  color: var(--text);
+  font-weight: 650;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.chip.is-active {
+  border-color: rgba(106, 163, 255, 0.55);
+  background: rgba(106, 163, 255, 0.18);
+}
+
+/* List (scrollable) */
+.list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-right: 2px; /* évite scrollbar qui colle */
+}
+
+.daysep {
+  margin: 10px 0 6px;
+  padding: 6px 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(34, 48, 90, 0.8);
+  background: rgba(15, 23, 48, 0.35);
+  color: var(--muted);
+  font-weight: 800;
+  font-size: 12px;
+}
+
+.item {
+  width: 100%;
+  min-height: var(--tap);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(34, 48, 90, 0.9);
+  background: rgba(15, 23, 48, 0.75);
+  color: var(--text);
+  text-align: left;
+}
+
+.item.is-selected {
+  border-color: rgba(106, 163, 255, 0.55);
+  background: rgba(106, 163, 255, 0.14);
+}
+
+.item-main {
+  min-width: 0;
+}
+
+.item-title {
+  font-weight: 750;
+  font-size: 14px;
+  line-height: 1.15;
+  word-break: break-word;
+}
+
+.item-sub {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.badge {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(167, 139, 250, 0.45);
+  background: rgba(167, 139, 250, 0.14);
+  color: rgba(231, 239, 255, 0.95);
+}
+
+.badge--muted {
+  border-color: rgba(147, 164, 203, 0.35);
+  background: rgba(147, 164, 203, 0.12);
+}
+
+/* Player */
+.player {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.now-title {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.now-name {
+  margin-top: 3px;
+  font-size: 13px;
+  font-weight: 750;
+  word-break: break-word;
+  line-height: 1.25;
+}
+
+.waveblock {
+  min-height: 0;
+}
+
+.sep {
+  border: none;
+  border-top: 1px solid rgba(34, 48, 90, 0.8);
+  margin: 2px 0;
+}
+
+/* Form */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .label {
@@ -136,142 +360,30 @@ body {
   padding: 0 12px;
   outline: none;
 }
+
 .control::placeholder {
   color: rgba(147, 164, 203, 0.75);
 }
 
-.chips {
-  display: flex;
-  gap: 8px;
-  overflow: auto;
-  padding-bottom: 2px;
-  -webkit-overflow-scrolling: touch;
-}
-.chip {
-  height: 36px;
-  padding: 0 12px;
-  border-radius: 999px;
-  border: 1px solid rgba(34, 48, 90, 0.9);
-  background: rgba(15, 23, 48, 0.75);
-  color: var(--text);
-  font-weight: 650;
-  font-size: 12px;
-  white-space: nowrap;
-}
-.chip.is-active {
-  border-color: rgba(106, 163, 255, 0.55);
-  background: rgba(106, 163, 255, 0.18);
-}
-
-.main {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.sectionhead {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 10px;
-  margin-bottom: 10px;
-}
-.sectionhead h2 {
-  margin: 0;
-  font-size: 14px;
-  letter-spacing: 0.3px;
-  text-transform: uppercase;
-  color: rgba(231, 239, 255, 0.92);
-}
-.meta {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.item {
-  width: 100%;
-  min-height: var(--tap);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
-  border-radius: 16px;
-  border: 1px solid rgba(34, 48, 90, 0.9);
-  background: rgba(15, 23, 48, 0.75);
-  color: var(--text);
-  text-align: left;
-}
-.item.is-selected {
-  border-color: rgba(106, 163, 255, 0.55);
-  background: rgba(106, 163, 255, 0.14);
-}
-.item-main {
-  min-width: 0;
-}
-.item-title {
-  font-weight: 750;
-  font-size: 14px;
-  line-height: 1.15;
-}
-.item-sub {
-  margin-top: 4px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.badge {
-  flex: 0 0 auto;
-  font-size: 11px;
-  font-weight: 800;
-  padding: 6px 10px;
-  border-radius: 999px;
-  border: 1px solid rgba(167, 139, 250, 0.45);
-  background: rgba(167, 139, 250, 0.14);
-  color: rgba(231, 239, 255, 0.95);
-}
-.badge--muted {
-  border-color: rgba(147, 164, 203, 0.35);
-  background: rgba(147, 164, 203, 0.12);
-}
-.badge--snore {
-  border-color: rgba(52, 211, 153, 0.45);
-  background: rgba(52, 211, 153, 0.14);
-}
-
-.player .now {
-  margin-bottom: 10px;
-}
-.now-title {
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 700;
-}
-.now-name {
-  margin-top: 3px;
-  font-size: 13px;
-  font-weight: 750;
-  word-break: break-word;
-  line-height: 1.25;
-}
-
-.audio {
-  width: 100%;
-  height: 42px;
-}
-
-.player-actions {
+.row-inline {
   display: grid;
-  grid-template-columns: 1fr 1.2fr 1fr;
+  grid-template-columns: 1fr auto;
   gap: 8px;
-  margin-top: 10px;
+  align-items: center;
 }
 
+@media (max-width: 380px) {
+  .row-inline {
+    grid-template-columns: 1fr;
+  }
+}
+
+.hint {
+  color: rgba(147, 164, 203, 0.9);
+  font-size: 12px;
+}
+
+/* Buttons */
 .btn {
   height: var(--tap);
   border-radius: 14px;
@@ -280,14 +392,14 @@ body {
   color: var(--text);
   font-weight: 750;
   font-size: 13px;
+  padding: 0 14px;
 }
+
 .btn--primary {
   border-color: rgba(106, 163, 255, 0.65);
   background: rgba(106, 163, 255, 0.2);
 }
-.btn--ghost {
-  background: transparent;
-}
+
 .btn--danger {
   border-color: rgba(255, 92, 116, 0.6);
   background: rgba(255, 92, 116, 0.14);
@@ -297,109 +409,107 @@ body {
   width: 100%;
 }
 
-.sep {
-  border: none;
-  border-top: 1px solid rgba(34, 48, 90, 0.8);
-  margin: 14px 0;
-}
-
-.form {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.field {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.grid2 {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
 .danger {
   margin-top: 2px;
 }
 
-/* Bottom nav */
-.bottomnav {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
-  background: rgba(11, 16, 32, 0.72);
-  border-top: 1px solid rgba(34, 48, 90, 0.75);
-  backdrop-filter: blur(10px);
-}
-.bottomnav {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-  max-width: 680px;
-  margin: 0 auto;
-}
-.navbtn {
-  height: 52px;
-  border-radius: 16px;
-  border: 1px solid rgba(34, 48, 90, 0.85);
-  background: rgba(15, 23, 48, 0.65);
-  color: var(--text);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  font-weight: 800;
-}
-.navbtn.is-active {
-  border-color: rgba(106, 163, 255, 0.55);
-  background: rgba(106, 163, 255, 0.14);
-}
-.navico {
-  font-size: 16px;
-}
-.navlbl {
+/* Empty state */
+.empty {
+  margin-top: 8px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px dashed rgba(34, 48, 90, 0.9);
+  color: var(--muted);
   font-size: 12px;
 }
 
-/* Small enhancements */
-button,
-select,
-input {
-  -webkit-tap-highlight-color: transparent;
-}
-button {
-  cursor: pointer;
-}
+/* -------------------------------------------------------------------------- */
+/* WavePlayer (WaveSurfer) — responsive & safe on mobile                       */
+/* -------------------------------------------------------------------------- */
 
-/* Waveform */
 .wavewrap {
-  margin-top: 6px;
-  display: grid;
-  gap: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
 }
 
 .wave {
   width: 100%;
-  height: 72px;
-  display: block;
   border-radius: 14px;
-  border: 1px solid rgba(34, 48, 90, 0.9);
-  background: rgba(15, 23, 48, 0.55);
-  cursor: pointer;
+  border: 1px solid rgba(34, 48, 90, 0.85);
+  background: rgba(15, 23, 48, 0.35);
+  overflow: hidden;
 }
 
 .time {
   display: flex;
-  justify-content: space-between;
+  justify-content: center;
+  gap: 8px;
   color: var(--muted);
   font-size: 12px;
   font-weight: 700;
-  letter-spacing: 0.2px;
 }
 
-.tsep {
-  opacity: 0.6;
-  margin: 0 6px;
+.player-actions {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 8px;
+}
+
+.player-actions .btn {
+  width: 100%;
+}
+
+/* Très petits écrans: play/pause en 1 ligne + actions dessous */
+@media (max-width: 360px) {
+  .player-actions {
+    grid-template-columns: 1fr 1fr;
+  }
+  .player-actions .btn--primary {
+    grid-column: 1 / -1;
+  }
+}
+
+/* Anti débordement horizontal (noms longs + canvas wavesurfer) */
+.card,
+.card * {
+  max-width: 100%;
+}
+
+@media (max-width: 899px) {
+  .topbar {
+    display: none;
+  }
+}
+
+/* Empêche la page entière de dépasser */
+html,
+body {
+  width: 100%;
+  overflow-x: hidden;
+}
+
+/* Même protection côté root React */
+#root {
+  width: 100%;
+  overflow-x: hidden;
+}
+
+/* En CSS Grid, les enfants ont min-width:auto => peuvent déborder */
+.main > * {
+  min-width: 0;
+}
+
+/* Blinde les contenus "à risque" (WaveSurfer utilise canvas) */
+img,
+svg,
+canvas {
+  max-width: 100%;
+  display: block;
+}
+
+/* Optionnel mais utile: évite les glitches d'overscroll horizontal */
+.chips {
+  overscroll-behavior-x: contain;
 }

@@ -1,65 +1,169 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { fetchRecordings, fmtBytes, isTail } from "./api.js";
+// App.jsx
+import React, {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useCallback,
+} from "react";
+import {
+  fetchRecordings,
+  fmtBytes,
+  setTag,
+  renameRecording,
+  deleteRecording,
+} from "./api.js";
 import WavePlayer from "./WavePlayer.jsx";
+
+const TAGS = ["Tous", "Non tagué", "Parole", "Ronflement", "Bruit"];
+
+function safeNameHint(name) {
+  return (name || "").replace(/\s+/g, "_");
+}
+
+function groupByDate(files) {
+  const map = new Map();
+  for (const f of files) {
+    const d = f.date || "Inconnu";
+    if (!map.has(d)) map.set(d, []);
+    map.get(d).push(f);
+  }
+  return Array.from(map.entries()).map(([date, items]) => ({ date, items }));
+}
 
 export default function App() {
   const [files, setFiles] = useState([]);
   const [err, setErr] = useState("");
-  const [q, setQ] = useState("");
-  const [chip, setChip] = useState("all"); // all | clips | tail
-  const [selected, setSelected] = useState(null);
 
-  async function refresh() {
+  const [tagFilter, setTagFilter] = useState("Tous");
+  const [selectedName, setSelectedName] = useState(null);
+
+  const [renameValue, setRenameValue] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  // refs pour éviter les "stale closures" du setInterval
+  const desiredSelectionRef = useRef(null); // dernier choix utilisateur à préserver
+  const selectedNameRef = useRef(null); // miroir de selectedName
+
+  useEffect(() => {
+    selectedNameRef.current = selectedName;
+  }, [selectedName]);
+
+  const selected = useMemo(() => {
+    if (!selectedName) return null;
+    return files.find((f) => f.name === selectedName) || null;
+  }, [files, selectedName]);
+
+  const visible = useMemo(() => {
+    const sorted = [...files].sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
+    if (tagFilter === "Tous") return sorted;
+    return sorted.filter((f) => (f.tag || "Non tagué") === tagFilter);
+  }, [files, tagFilter]);
+
+  const grouped = useMemo(() => groupByDate(visible), [visible]);
+
+  const refresh = useCallback(async () => {
     try {
       const data = await fetchRecordings();
       setFiles(data);
       setErr("");
-      if (!selected && data[0]) setSelected(data[0]);
+
+      const want = desiredSelectionRef.current || selectedNameRef.current;
+
+      // 1) si on "veut" quelque chose et que ça existe : on garde
+      if (want && data.some((x) => x.name === want)) {
+        setSelectedName(want);
+        // on ne vide desiredSelectionRef que si on l’a effectivement appliqué
+        if (desiredSelectionRef.current === want)
+          desiredSelectionRef.current = null;
+        return;
+      }
+
+      // 2) si la sélection actuelle existe encore : ne rien changer
+      const cur = selectedNameRef.current;
+      if (cur && data.some((x) => x.name === cur)) return;
+
+      // 3) sinon fallback sur le premier
+      if (data[0]) setSelectedName(data[0].name);
+      else setSelectedName(null);
     } catch (e) {
       setErr(e?.message || String(e));
     }
-  }
-
-  useEffect(() => {
-    refresh();
-    const t = setInterval(refresh, 2000);
-    return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const visible = useMemo(() => {
-    const qq = q.trim().toLowerCase();
-    return files.filter((f) => {
-      const name = (f.name || "").toLowerCase();
-      if (qq && !name.includes(qq)) return false;
-      if (chip === "tail") return isTail(name);
-      if (chip === "clips") return !isTail(name);
-      return true;
-    });
-  }, [files, q, chip]);
+  // poll léger (utilise refresh stable + refs => pas de rollback)
+  useEffect(() => {
+    refresh();
+    const t = setInterval(() => {
+      refresh();
+    }, 2500);
+    return () => clearInterval(t);
+  }, [refresh]);
+
+  // sync rename input quand la sélection change
+  useEffect(() => {
+    setRenameValue(selected?.name ? safeNameHint(selected.name) : "");
+  }, [selected?.name]);
 
   function pick(f) {
-    setSelected(f);
-    // autoplay soft
-    const a = document.getElementById("audio");
-    if (a) {
-      a.load();
-      a.play().catch(() => {});
+    desiredSelectionRef.current = f.name;
+    setSelectedName(f.name);
+  }
+
+  async function onSetTag(tag) {
+    if (!selected || busy) return;
+    try {
+      setBusy(true);
+      await setTag(selected.name, tag);
+      desiredSelectionRef.current = selected.name;
+      await refresh();
+    } catch (e) {
+      setErr(e?.message || String(e));
+    } finally {
+      setBusy(false);
     }
   }
 
-  function seek(delta) {
-    const a = document.getElementById("audio");
-    if (!a) return;
-    a.currentTime = Math.max(0, (a.currentTime || 0) + delta);
+  async function onRename() {
+    if (!selected || busy) return;
+
+    const raw = (renameValue || "").trim();
+    if (!raw) return;
+
+    const finalName = raw.toLowerCase().endsWith(".wav") ? raw : `${raw}.wav`;
+    if (finalName === selected.name) return;
+
+    try {
+      setBusy(true);
+      const r = await renameRecording(selected.name, finalName);
+      desiredSelectionRef.current = r?.name || finalName;
+      await refresh();
+    } catch (e) {
+      setErr(e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
-  function togglePlay() {
-    const a = document.getElementById("audio");
-    if (!a) return;
-    if (a.paused) a.play();
-    else a.pause();
+  async function onDelete() {
+    if (!selected || busy) return;
+
+    const ok = window.confirm(`Supprimer définitivement "${selected.name}" ?`);
+    if (!ok) return;
+
+    try {
+      setBusy(true);
+      await deleteRecording(selected.name);
+      desiredSelectionRef.current = null;
+      await refresh();
+    } catch (e) {
+      setErr(e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
   }
+
+  const selectedTag = selected?.tag || "Non tagué";
 
   return (
     <div className="app">
@@ -73,117 +177,157 @@ export default function App() {
             <p>LAN only • clips détectés</p>
           </div>
         </div>
-        <button className="iconbtn" type="button" aria-label="Réglages">
+
+        <button
+          className="iconbtn"
+          type="button"
+          aria-label="Réglages"
+          disabled
+        >
           ⚙️
         </button>
       </header>
 
       <section className="controls card">
-        <div className="row">
-          <label className="label" htmlFor="search">
-            Filtre
-          </label>
-          <input
-            id="search"
-            className="control"
-            type="search"
-            placeholder="ronflement, parole, bruit…"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-          />
-        </div>
-
-        <div className="chips" aria-label="Filtres rapides">
-          <button
-            className={`chip ${chip === "all" ? "is-active" : ""}`}
-            onClick={() => setChip("all")}
-            type="button"
-          >
-            Tous
-          </button>
-          <button
-            className={`chip ${chip === "clips" ? "is-active" : ""}`}
-            onClick={() => setChip("clips")}
-            type="button"
-          >
-            Clips
-          </button>
-          <button
-            className={`chip ${chip === "tail" ? "is-active" : ""}`}
-            onClick={() => setChip("tail")}
-            type="button"
-          >
-            Tail
-          </button>
+        <div className="chips" aria-label="Filtres par tag">
+          {TAGS.map((t) => (
+            <button
+              key={t}
+              className={`chip ${tagFilter === t ? "is-active" : ""}`}
+              onClick={() => setTagFilter(t)}
+              type="button"
+            >
+              {t}
+            </button>
+          ))}
         </div>
       </section>
 
       <main className="main">
-        <section className="card">
+        {/* LISTE */}
+        <section className="card card--panel" aria-label="Liste des clips">
           <div className="sectionhead">
             <h2>Clips</h2>
-            <div className="meta">{visible.length} éléments</div>
+            <div className="meta">
+              {visible.length} élément{visible.length > 1 ? "s" : ""}
+            </div>
           </div>
 
-          {err ? <div className="meta">Erreur: {err}</div> : null}
+          {err ? <div className="alert">Erreur: {err}</div> : null}
 
           <div className="list">
-            {visible.map((f) => (
-              <button
-                key={f.name}
-                className={`item ${
-                  selected?.name === f.name ? "is-selected" : ""
-                }`}
-                type="button"
-                onClick={() => pick(f)}
-              >
-                <div className="item-main">
-                  <div className="item-title">{f.name}</div>
-                  <div className="item-sub">{fmtBytes(f.size)}</div>
-                </div>
-                <div
-                  className={`badge ${isTail(f.name) ? "badge--muted" : ""}`}
-                >
-                  {isTail(f.name) ? "Tail" : "Clip"}
-                </div>
-              </button>
+            {grouped.map(({ date, items }) => (
+              <div key={date}>
+                <div className="daysep">{date}</div>
+
+                {items.map((f) => (
+                  <button
+                    key={f.name}
+                    className={`item ${
+                      selected?.name === f.name ? "is-selected" : ""
+                    }`}
+                    type="button"
+                    onClick={() => pick(f)}
+                  >
+                    <div className="item-main">
+                      <div className="item-title">
+                        {f.time ? `${f.time} • ` : ""}
+                        {f.name}
+                      </div>
+                      <div className="item-sub">{fmtBytes(f.size)}</div>
+                    </div>
+
+                    <div className={`badge ${f.tag ? "" : "badge--muted"}`}>
+                      {f.tag || "Non tagué"}
+                    </div>
+                  </button>
+                ))}
+              </div>
             ))}
+
+            {visible.length === 0 ? (
+              <div className="empty">Aucun clip pour ce filtre.</div>
+            ) : null}
           </div>
         </section>
 
-        <section className="card">
+        {/* LECTURE */}
+        <section className="card card--panel" aria-label="Lecture et actions">
           <div className="sectionhead">
             <h2>Lecture</h2>
-            <div className="meta">
-              Sélection : <b>{selected?.name ?? "—"}</b>
-            </div>
+            <div className="meta">{selected ? "1 sélection" : "—"}</div>
           </div>
 
           <div className="player">
             <div className="now">
-              <div className="now-title">Clip sélectionné</div>
+              <div className="now-title">
+                {selected?.date && selected?.time
+                  ? `${selected.date} • ${selected.time}`
+                  : "Date inconnue"}
+              </div>
               <div className="now-name">{selected?.name ?? "—"}</div>
             </div>
 
-            <WavePlayer url={selected?.url || ""} />
+            <div className="waveblock">
+              <WavePlayer url={selected?.url || ""} />
+            </div>
+
+            <hr className="sep" />
+
+            <div className="field">
+              <label className="label">Tag</label>
+              <div className="chips" aria-label="Changer le tag">
+                {TAGS.filter((t) => t !== "Tous").map((t) => (
+                  <button
+                    key={t}
+                    className={`chip ${selectedTag === t ? "is-active" : ""}`}
+                    type="button"
+                    onClick={() => onSetTag(t)}
+                    disabled={!selected || busy}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="field">
+              <label className="label" htmlFor="rename">
+                Renommer
+              </label>
+              <div className="row-inline">
+                <input
+                  id="rename"
+                  className="control"
+                  value={renameValue}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  placeholder={selected ? selected.name : "—"}
+                  disabled={!selected || busy}
+                />
+                <button
+                  className="btn btn--primary"
+                  type="button"
+                  onClick={onRename}
+                  disabled={!selected || busy}
+                >
+                  Appliquer
+                </button>
+              </div>
+            </div>
+
+            <div className="danger">
+              <button
+                className="btn btn--danger btn--full"
+                type="button"
+                onClick={onDelete}
+                disabled={!selected || busy}
+              >
+                Supprimer ce clip
+              </button>
+            </div>
           </div>
         </section>
       </main>
-
-      <nav className="bottomnav" aria-label="Navigation">
-        <button className="navbtn is-active" type="button">
-          <span className="navico">📄</span>
-          <span className="navlbl">Clips</span>
-        </button>
-        <button className="navbtn" type="button">
-          <span className="navico">🗂️</span>
-          <span className="navlbl">Archives</span>
-        </button>
-        <button className="navbtn" type="button">
-          <span className="navico">🔎</span>
-          <span className="navlbl">Recherche</span>
-        </button>
-      </nav>
     </div>
   );
 }
