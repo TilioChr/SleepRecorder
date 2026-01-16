@@ -13,7 +13,6 @@ import numpy as np
 import webrtcvad
 
 import torch
-from panns_inference import AudioTagging, labels as PANNS_LABELS
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
@@ -29,6 +28,9 @@ from .settings import (
     CHUNK_SECONDS
 )
 
+# --- important: where panns downloads its files ---
+os.environ.setdefault("PANNS_DATA_DIR", "/app/panns_data")
+
 # -------------------------
 # Paths / persistence
 # -------------------------
@@ -40,10 +42,10 @@ META_PATH = REC_DIR / "meta.json"
 NAME_SAFE = re.compile(r"^[a-zA-Z0-9._-]+$")
 META_LOCK = threading.Lock()
 
-STATUS_UNPROCESSED = "unprocessed"   # rouge
-STATUS_PROCESSING = "processing"     # orange
-STATUS_DONE = "done"                 # bleu
-STATUS_ERROR = "error"               # rouge
+STATUS_UNPROCESSED = "unprocessed"
+STATUS_PROCESSING = "processing"
+STATUS_DONE = "done"
+STATUS_ERROR = "error"
 
 
 def _load_meta() -> dict:
@@ -98,12 +100,13 @@ def _ensure_meta_entry(meta: dict, filename: str, recorded_at: Optional[int] = N
         meta[filename] = entry
 
     entry.setdefault("tag", "Non tagué")
-    entry.setdefault("tag_source", "auto")  # auto par défaut (manual si user change)
+    entry.setdefault("tag_source", "auto")
     entry.setdefault("processing_status", STATUS_UNPROCESSED)
     entry.setdefault("activity", None)
     entry.setdefault("sound_type", None)
     entry.setdefault("processed_at", None)
     entry.setdefault("error", None)
+    entry.setdefault("scores", {})
 
     if entry.get("recorded_at") is None:
         if recorded_at is not None:
@@ -120,7 +123,7 @@ def _ensure_meta_entry(meta: dict, filename: str, recorded_at: Optional[int] = N
 
 
 # -------------------------
-# Audio IO helpers
+# Audio helpers
 # -------------------------
 
 def _read_wav_pcm16(path: Path) -> Tuple[int, np.ndarray]:
@@ -161,14 +164,10 @@ def _resample_linear(x: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
 
 
 # -------------------------
-# VAD gate (webrtcvad)
+# VAD gate
 # -------------------------
 
 def vad_activity(sr: int, x_i16: np.ndarray) -> float:
-    """
-    Retourne voiced_ratio (0..1) basé sur webrtcvad.
-    On resample à 16k pour VAD si besoin.
-    """
     if len(x_i16) < sr // 10:
         return 0.0
 
@@ -177,7 +176,7 @@ def vad_activity(sr: int, x_i16: np.ndarray) -> float:
         sr = 16000
 
     frame_ms = 30
-    frame_len = int(sr * frame_ms / 1000)  # 480 samples @ 16k
+    frame_len = int(sr * frame_ms / 1000)
     n_frames = len(x_i16) // frame_len
     if n_frames <= 0:
         return 0.0
@@ -194,31 +193,27 @@ def vad_activity(sr: int, x_i16: np.ndarray) -> float:
 
 
 # -------------------------
-# PANNs pretrained (AudioSet tagging)
+# PANNs pretrained (lazy import)
 # -------------------------
 
 _AT = None
-_LABEL_TO_IDX = {lbl: i for i, lbl in enumerate(PANNS_LABELS)}
+_PANNS_LABELS = None
 
+def _ensure_panns_loaded():
+    global _AT, _PANNS_LABELS
+    if _AT is not None and _PANNS_LABELS is not None:
+        return
 
-def _get_audio_tagger():
-    global _AT
-    if _AT is not None:
-        return _AT
+    # import ici pour éviter crash au démarrage si le CSV n'est pas encore là
+    from panns_inference import AudioTagging, labels as PANNS_LABELS
 
-    # CPU only (simple + stable)
-    device = "cpu"
-    _AT = AudioTagging(checkpoint_path=None, device=device)
-    return _AT
+    _PANNS_LABELS = PANNS_LABELS
+    _AT = AudioTagging(checkpoint_path=None, device="cpu")
 
 
 def _max_prob_for_keywords(probs: np.ndarray, keywords: list[str]) -> float:
-    """
-    probs: (527,) float
-    keywords: substrings (lowercase)
-    """
     best = 0.0
-    for i, lbl in enumerate(PANNS_LABELS):
+    for i, lbl in enumerate(_PANNS_LABELS):
         ll = lbl.lower()
         if any(k in ll for k in keywords):
             p = float(probs[i])
@@ -228,40 +223,28 @@ def _max_prob_for_keywords(probs: np.ndarray, keywords: list[str]) -> float:
 
 
 def classify_with_panns(sr: int, x_i16: np.ndarray) -> dict:
-    """
-    Retourne sound_type in {"voice","snore","noise","silence"} + scores.
-    PANNs attend un signal float32 mono à 32k.
-    """
-    if len(x_i16) == 0:
-        return {"sound_type": "silence", "scores": {}}
+    _ensure_panns_loaded()
 
-    # resample -> 32k
     if sr != 32000:
         x_i16 = _resample_linear(x_i16, sr, 32000)
         sr = 32000
 
-    # int16 -> float32 [-1..1]
     audio = (x_i16.astype(np.float32) / 32768.0)[None, :]  # (1, N)
 
-    at = _get_audio_tagger()
-
     with torch.inference_mode():
-        clipwise_output, _ = at.inference(audio)  # (1, 527)
+        clipwise_output, _ = _AT.inference(audio)
 
-    probs = clipwise_output[0]  # (527,)
-    # mapping robuste via keywords (pas dépendant des labels exacts)
+    probs = clipwise_output[0]
+
     p_voice = _max_prob_for_keywords(probs, ["speech", "conversation", "narration", "talk", "voice"])
-    p_snore = _max_prob_for_keywords(probs, ["snor"])  # "snoring" etc
-    # bruit : tout sauf parole/ronflement, on prend un “proxy”
-    # (si ni voice ni snore dominent, on classe bruit)
-    scores = {"voice": p_voice, "snore": p_snore}
+    p_snore = _max_prob_for_keywords(probs, ["snor"])
 
-    # thresholds (à ajuster selon ton micro/environnement)
+    # seuils à ajuster ensuite
     if p_snore >= 0.25 and p_snore >= p_voice:
-        return {"sound_type": "snore", "scores": scores}
+        return {"sound_type": "snore", "scores": {"voice": p_voice, "snore": p_snore}}
     if p_voice >= 0.30 and p_voice >= p_snore:
-        return {"sound_type": "voice", "scores": scores}
-    return {"sound_type": "noise", "scores": scores}
+        return {"sound_type": "voice", "scores": {"voice": p_voice, "snore": p_snore}}
+    return {"sound_type": "noise", "scores": {"voice": p_voice, "snore": p_snore}}
 
 
 def _auto_tag_from_sound(sound_type: str) -> str:
@@ -276,14 +259,12 @@ def _auto_tag_from_sound(sound_type: str) -> str:
 
 def analyze_audio(path: Path) -> dict:
     sr, x = _read_wav_pcm16(path)
-
     voiced_ratio = vad_activity(sr, x)
     activity = voiced_ratio >= 0.08
 
     if not activity:
         return {"activity": False, "sound_type": "silence", "voiced_ratio": float(voiced_ratio), "scores": {}}
 
-    # activité détectée -> classification pretrained
     cls = classify_with_panns(sr, x)
     return {
         "activity": True,
@@ -327,7 +308,6 @@ def processing_worker():
             time.sleep(1.5)
             continue
 
-        # mark processing
         meta = _load_meta()
         entry = _ensure_meta_entry(meta, job.name, recorded_at=int(job.stat().st_mtime))
         if entry.get("processing_status") != STATUS_UNPROCESSED:
@@ -346,10 +326,10 @@ def processing_worker():
 
             entry["activity"] = bool(res.get("activity"))
             entry["sound_type"] = res.get("sound_type")
+            entry["scores"] = res.get("scores", {})
             entry["processed_at"] = int(time.time())
             entry["processing_status"] = STATUS_DONE
             entry["error"] = None
-            entry["scores"] = res.get("scores", {})
 
             if entry.get("tag_source", "auto") != "manual":
                 entry["tag"] = _auto_tag_from_sound(entry.get("sound_type") or "")
