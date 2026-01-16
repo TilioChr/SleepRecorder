@@ -65,6 +65,11 @@ Utiliser avec Raspberry Pi
 arecord -D plughw:1,0 -f S16_LE -r 16000 -c 1 | nc <IP_BACKEND> 5000
 ```
 
+Log Backend : 
+```bash
+docker-compose logs -f backend
+```
+
 ---
 
 ### Endpoints utiles :
