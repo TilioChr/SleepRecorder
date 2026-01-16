@@ -255,7 +255,7 @@ export default function App() {
         <section className="card card--panel" aria-label="Lecture et actions">
           <div className="sectionhead">
             <h2>Lecture</h2>
-            <div className="meta">{selected ? "1 sélection" : "—"}</div>
+            <div className="meta">{selected ? "" : "N/A"}</div>
           </div>
 
           <div className="player">
