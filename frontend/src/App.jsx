@@ -17,12 +17,6 @@ import WavePlayer from "./WavePlayer.jsx";
 
 const TAGS = ["Tous", "Non tagué", "Parole", "Ronflement", "Bruit"];
 
-function statusClass(s) {
-  if (s === "done") return "dot--done";
-  if (s === "processing") return "dot--processing";
-  return "dot--pending";
-}
-
 function safeNameHint(name) {
   return (name || "").replace(/\s+/g, "_");
 }
@@ -35,6 +29,21 @@ function groupByDate(files) {
     map.get(d).push(f);
   }
   return Array.from(map.entries()).map(([date, items]) => ({ date, items }));
+}
+
+function statusClass(status) {
+  // backend: unprocessed / processing / done / error
+  if (status === "done") return "status-done";
+  if (status === "processing") return "status-processing";
+  // unprocessed + error => rouge
+  return "status-unprocessed";
+}
+
+function statusTitle(status) {
+  if (status === "done") return "Traitement terminé";
+  if (status === "processing") return "Traitement en cours";
+  if (status === "error") return "Erreur de traitement";
+  return "Pas encore traité";
 }
 
 export default function App() {
@@ -79,7 +88,6 @@ export default function App() {
       // 1) si on "veut" quelque chose et que ça existe : on garde
       if (want && data.some((x) => x.name === want)) {
         setSelectedName(want);
-        // on ne vide desiredSelectionRef que si on l’a effectivement appliqué
         if (desiredSelectionRef.current === want)
           desiredSelectionRef.current = null;
         return;
@@ -97,7 +105,7 @@ export default function App() {
     }
   }, []);
 
-  // poll léger (utilise refresh stable + refs => pas de rollback)
+  // poll léger
   useEffect(() => {
     refresh();
     const t = setInterval(() => {
@@ -237,33 +245,20 @@ export default function App() {
                   >
                     <div className="item-main">
                       <div className="item-title">
+                        <span
+                          className={`status-dot ${statusClass(
+                            f.processing_status
+                          )}`}
+                          title={statusTitle(f.processing_status)}
+                        />
                         {f.time ? `${f.time} • ` : ""}
                         {f.name}
                       </div>
                       <div className="item-sub">{fmtBytes(f.size)}</div>
                     </div>
 
-                    <div className="item-right">
-                      <span
-                        className={`dot ${statusClass(f.analysis_status)}`}
-                        title={
-                          f.analysis_status === "done"
-                            ? "Traité"
-                            : f.analysis_status === "processing"
-                            ? "Traitement en cours"
-                            : "Pas encore traité"
-                        }
-                        aria-label={
-                          f.analysis_status === "done"
-                            ? "Traité"
-                            : f.analysis_status === "processing"
-                            ? "Traitement en cours"
-                            : "Pas encore traité"
-                        }
-                      />
-                      <div className={`badge ${f.tag ? "" : "badge--muted"}`}>
-                        {f.tag || "Non tagué"}
-                      </div>
+                    <div className={`badge ${f.tag ? "" : "badge--muted"}`}>
+                      {f.tag || "Non tagué"}
                     </div>
                   </button>
                 ))}
