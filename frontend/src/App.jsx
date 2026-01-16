@@ -265,7 +265,7 @@ export default function App() {
                   ? `${selected.date} • ${selected.time}`
                   : "Date inconnue"}
               </div>
-              <div className="now-name">{selected?.name ?? "—"}</div>
+              <div className="now-name">{selected?.name ?? "N/A"}</div>
             </div>
 
             <div className="waveblock">
