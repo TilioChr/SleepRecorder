@@ -3,6 +3,7 @@ import re
 import json
 import socket
 import threading
+import time
 import wave
 from datetime import datetime
 from pathlib import Path
@@ -68,6 +69,23 @@ def _parse_dt_from_name(name: str):
     return date_str, time_str
 
 
+def _ts_from_date_time(date_str: str, time_str: str) -> int | None:
+    """
+    Convertit ("YYYY-MM-DD", "HH:MM:SS") en timestamp Unix (secondes).
+    Interprété en heure locale (naïf), cohérent avec datetime.now() utilisé pour nommer.
+    """
+    try:
+        dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
+        return int(dt.timestamp())
+    except Exception:
+        return None
+
+
+def _date_time_from_ts(ts: int):
+    dt = datetime.fromtimestamp(int(ts))
+    return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M:%S")
+
+
 # -------------------------
 # FastAPI
 # -------------------------
@@ -79,7 +97,7 @@ def now_id():
     return datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
-def write_wav(path: Path, pcm_bytes: bytes):
+def write_wav(path: Path, pcm_bytes: bytes, recorded_at: int | None = None):
     # ensure parent exists
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -89,10 +107,18 @@ def write_wav(path: Path, pcm_bytes: bytes):
         wf.setframerate(SAMPLE_RATE)
         wf.writeframes(pcm_bytes)
 
+    # Persist une date/heure stable dans meta.json, indépendante du nom de fichier
+    meta = _load_meta()
+    meta.setdefault(path.name, {})
+    meta[path.name].setdefault("tag", "Non tagué")
+    meta[path.name].setdefault("recorded_at", int(recorded_at if recorded_at is not None else time.time()))
+    _save_meta(meta)
+
 
 def list_wavs():
     meta = _load_meta()
     out = []
+    meta_dirty = False
 
     try:
         entries = list(REC_DIR.iterdir())
@@ -110,18 +136,47 @@ def list_wavs():
         except FileNotFoundError:
             continue
 
-        date_str, time_str = _parse_dt_from_name(p.name)
-        tag = (meta.get(p.name) or {}).get("tag", "Non tagué")
+        entry_meta = meta.get(p.name) or {}
+        tag = entry_meta.get("tag", "Non tagué")
+        recorded_at = entry_meta.get("recorded_at")
+
+        # 1) Si on a un nom avec date/heure et pas recorded_at, on migre une fois
+        name_date, name_time = _parse_dt_from_name(p.name)
+        if recorded_at is None and name_date and name_time:
+            ts = _ts_from_date_time(name_date, name_time)
+            if ts is not None:
+                meta.setdefault(p.name, {})
+                meta[p.name]["recorded_at"] = ts
+                recorded_at = ts
+                meta_dirty = True
+
+        # 2) Si toujours pas de recorded_at, fallback sur mtime (meilleur possible)
+        if recorded_at is None:
+            recorded_at = int(st.st_mtime)
+            meta.setdefault(p.name, {})
+            meta[p.name].setdefault("recorded_at", recorded_at)
+            meta_dirty = True
+
+        # 3) date/time affichés:
+        #    - si le nom est parseable, on garde l'affichage depuis le nom
+        #    - sinon, on affiche recorded_at (stable)
+        if name_date and name_time:
+            date_str, time_str = name_date, name_time
+        else:
+            date_str, time_str = _date_time_from_ts(recorded_at)
 
         out.append({
             "name": p.name,
             "size": st.st_size,
             "mtime": int(st.st_mtime),
-            "date": date_str,   # "YYYY-MM-DD" if parseable
-            "time": time_str,   # "HH:MM:SS" if parseable
+            "date": date_str,
+            "time": time_str,
             "tag": tag,
             "url": f"/recordings/{p.name}",
         })
+
+    if meta_dirty:
+        _save_meta(meta)
 
     # most recent first
     out.sort(key=lambda x: x["mtime"], reverse=True)
@@ -157,9 +212,17 @@ def api_rename(name: str, body: RenameBody):
     src.rename(dst)
 
     meta = _load_meta()
+
+    # Déplacer la meta si elle existe
     if name in meta:
         meta[body.new_name] = meta.pop(name)
-        _save_meta(meta)
+
+    # Assurer recorded_at même pour d'anciens fichiers (ou si pas de meta)
+    meta.setdefault(body.new_name, {})
+    meta[body.new_name].setdefault("tag", "Non tagué")
+    meta[body.new_name].setdefault("recorded_at", int(dst.stat().st_mtime))
+
+    _save_meta(meta)
 
     return {"ok": True, "name": body.new_name}
 
@@ -192,6 +255,7 @@ def api_tag(name: str, body: TagBody):
 
     meta = _load_meta()
     meta.setdefault(name, {})
+    meta[name].setdefault("recorded_at", int(p.stat().st_mtime))
     meta[name]["tag"] = body.tag
     _save_meta(meta)
 
@@ -244,7 +308,7 @@ def audio_tcp_server():
                     buf = buf[target_chunk_bytes:]
 
                     fname = f"{now_id()}_{CHUNK_SECONDS}s.wav"
-                    write_wav(REC_DIR / fname, chunk)
+                    write_wav(REC_DIR / fname, chunk, recorded_at=int(time.time()))
                     print(f"[AUDIO] wrote {fname}")
 
         except socket.timeout:
@@ -254,7 +318,7 @@ def audio_tcp_server():
 
             if buf:
                 fname = f"{now_id()}_tail.wav"
-                write_wav(REC_DIR / fname, buf)
+                write_wav(REC_DIR / fname, buf, recorded_at=int(time.time()))
                 print(f"[AUDIO] wrote {fname}")
 
             print("[AUDIO] disconnected")
