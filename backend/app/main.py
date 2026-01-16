@@ -12,6 +12,9 @@ from typing import Optional, Tuple
 import numpy as np
 import webrtcvad
 
+import torch
+from panns_inference import AudioTagging, labels as PANNS_LABELS
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -34,14 +37,13 @@ REC_DIR = Path(RECORDINGS_DIR)
 REC_DIR.mkdir(parents=True, exist_ok=True)
 
 META_PATH = REC_DIR / "meta.json"
-NAME_SAFE = re.compile(r"^[a-zA-Z0-9._-]+$")  # avoid path traversal + weird chars
+NAME_SAFE = re.compile(r"^[a-zA-Z0-9._-]+$")
 META_LOCK = threading.Lock()
 
-# processing_status values
 STATUS_UNPROCESSED = "unprocessed"   # rouge
 STATUS_PROCESSING = "processing"     # orange
 STATUS_DONE = "done"                 # bleu
-STATUS_ERROR = "error"               # rouge (fallback)
+STATUS_ERROR = "error"               # rouge
 
 
 def _load_meta() -> dict:
@@ -51,7 +53,6 @@ def _load_meta() -> dict:
         except FileNotFoundError:
             return {}
         except Exception:
-            # if corrupted, don't crash the whole app
             return {}
 
 
@@ -68,10 +69,6 @@ def _check_name(name: str) -> None:
 
 
 def _parse_dt_from_name(name: str):
-    """
-    Expected filename prefix: YYYYMMDD-HHMMSS...
-    Returns: ("YYYY-MM-DD", "HH:MM:SS") or (None, None)
-    """
     m = re.match(r"^(\d{8})-(\d{6})", name)
     if not m:
         return None, None
@@ -95,10 +92,6 @@ def _date_time_from_ts(ts: int):
 
 
 def _ensure_meta_entry(meta: dict, filename: str, recorded_at: Optional[int] = None) -> dict:
-    """
-    Garantit que meta[filename] existe avec les champs minimums.
-    recorded_at est la date stable de "création"/enregistrement (pas dépendante du rename).
-    """
     entry = meta.get(filename)
     if not isinstance(entry, dict):
         entry = {}
@@ -116,14 +109,10 @@ def _ensure_meta_entry(meta: dict, filename: str, recorded_at: Optional[int] = N
         if recorded_at is not None:
             entry["recorded_at"] = int(recorded_at)
         else:
-            # tentative migration depuis le nom
             d, t = _parse_dt_from_name(filename)
             if d and t:
                 ts = _ts_from_date_time(d, t)
-                if ts is not None:
-                    entry["recorded_at"] = ts
-                else:
-                    entry["recorded_at"] = int(time.time())
+                entry["recorded_at"] = int(ts if ts is not None else time.time())
             else:
                 entry["recorded_at"] = int(time.time())
 
@@ -131,14 +120,10 @@ def _ensure_meta_entry(meta: dict, filename: str, recorded_at: Optional[int] = N
 
 
 # -------------------------
-# VAD + classification (simple heuristics)
+# Audio IO helpers
 # -------------------------
 
 def _read_wav_pcm16(path: Path) -> Tuple[int, np.ndarray]:
-    """
-    Retourne (sample_rate, samples int16 mono).
-    Hypothèse projet: wav mono, 16k, s16le. On protège quand même.
-    """
     with wave.open(str(path), "rb") as wf:
         sr = wf.getframerate()
         ch = wf.getnchannels()
@@ -149,118 +134,134 @@ def _read_wav_pcm16(path: Path) -> Tuple[int, np.ndarray]:
     if sw != 2:
         raise ValueError(f"Unsupported sample width: {sw} bytes (expected 2)")
 
-    samples = np.frombuffer(raw, dtype=np.int16)
+    x = np.frombuffer(raw, dtype=np.int16)
     if ch == 2:
-        samples = samples.reshape(-1, 2).mean(axis=1).astype(np.int16)
+        x = x.reshape(-1, 2).mean(axis=1).astype(np.int16)
     elif ch != 1:
         raise ValueError(f"Unsupported channels: {ch} (expected 1)")
 
+    return sr, x
+
+
+def _resample_linear(x: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
+    if sr_in == sr_out:
+        return x
+    if len(x) == 0:
+        return x
+    duration = len(x) / float(sr_in)
+    new_len = int(duration * sr_out)
+    if new_len <= 0:
+        return np.zeros((0,), dtype=x.dtype)
+
+    xf = x.astype(np.float32)
+    xp = np.linspace(0.0, 1.0, num=len(xf), endpoint=False)
+    xq = np.linspace(0.0, 1.0, num=new_len, endpoint=False)
+    y = np.interp(xq, xp, xf)
+    return y.astype(np.int16)
+
+
+# -------------------------
+# VAD gate (webrtcvad)
+# -------------------------
+
+def vad_activity(sr: int, x_i16: np.ndarray) -> float:
+    """
+    Retourne voiced_ratio (0..1) basé sur webrtcvad.
+    On resample à 16k pour VAD si besoin.
+    """
+    if len(x_i16) < sr // 10:
+        return 0.0
+
     if sr != 16000:
-        # resample simple (linéaire) pour éviter dépendances lourdes
-        x = samples.astype(np.float32)
-        duration = len(x) / float(sr)
-        new_len = int(duration * 16000)
-        if new_len <= 0:
-            return 16000, np.zeros((0,), dtype=np.int16)
-        xp = np.linspace(0.0, 1.0, num=len(x), endpoint=False)
-        xq = np.linspace(0.0, 1.0, num=new_len, endpoint=False)
-        y = np.interp(xq, xp, x).astype(np.int16)
-        return 16000, y
+        x_i16 = _resample_linear(x_i16, sr, 16000)
+        sr = 16000
 
-    return sr, samples
-
-
-def _frame_bytes(samples_i16: np.ndarray, frame_size: int) -> bytes:
-    # frame_size in samples
-    return samples_i16[:frame_size].tobytes()
-
-
-def analyze_audio(path: Path) -> dict:
-    """
-    1) VAD (webrtcvad) -> activity + voiced_ratio
-    2) Si activity: heuristiques -> snore / voice / noise
-    """
-    sr, x = _read_wav_pcm16(path)
-    if len(x) < sr // 10:  # <100ms
-        return {"activity": False, "sound_type": "silence", "voiced_ratio": 0.0}
-
-    vad = webrtcvad.Vad(2)  # 0..3 (2 = bon compromis)
     frame_ms = 30
     frame_len = int(sr * frame_ms / 1000)  # 480 samples @ 16k
-    if frame_len <= 0:
-        return {"activity": False, "sound_type": "silence", "voiced_ratio": 0.0}
+    n_frames = len(x_i16) // frame_len
+    if n_frames <= 0:
+        return 0.0
 
-    # tronquer en frames complètes
-    n_frames = len(x) // frame_len
-    if n_frames == 0:
-        return {"activity": False, "sound_type": "silence", "voiced_ratio": 0.0}
-
-    x_frames = x[: n_frames * frame_len].reshape(n_frames, frame_len)
+    vad = webrtcvad.Vad(2)
+    x_frames = x_i16[: n_frames * frame_len].reshape(n_frames, frame_len)
 
     voiced = 0
-    voiced_idx = []
     for i in range(n_frames):
-        fb = x_frames[i].tobytes()
-        is_speech = vad.is_speech(fb, sr)
-        if is_speech:
+        if vad.is_speech(x_frames[i].tobytes(), sr):
             voiced += 1
-            voiced_idx.append(i)
 
-    voiced_ratio = voiced / float(n_frames)
-    activity = voiced_ratio >= 0.08  # seuil "il se passe quelque chose"
-    if not activity:
-        return {"activity": False, "sound_type": "silence", "voiced_ratio": voiced_ratio}
+    return voiced / float(n_frames)
 
-    # Features sur les frames "voiced" (ou fallback sur tout)
-    use = x_frames[voiced_idx] if voiced_idx else x_frames
-    y = use.flatten().astype(np.float32)
 
-    # RMS
-    rms = float(np.sqrt(np.mean(y * y)) / 32768.0 + 1e-12)
+# -------------------------
+# PANNs pretrained (AudioSet tagging)
+# -------------------------
 
-    # ZCR
-    zc = np.mean(np.abs(np.diff(np.sign(y)))) / 2.0  # approx
-    zcr = float(zc)
+_AT = None
+_LABEL_TO_IDX = {lbl: i for i, lbl in enumerate(PANNS_LABELS)}
 
-    # Spectre moyen (FFT sur fenêtres 1s si possible)
-    win = sr  # 1 sec
-    if len(y) < win:
-        seg = y
-    else:
-        seg = y[:win]
-    seg = seg * np.hanning(len(seg)).astype(np.float32)
 
-    spec = np.fft.rfft(seg)
-    mag = np.abs(spec) + 1e-12
-    freqs = np.fft.rfftfreq(len(seg), d=1.0 / sr)
+def _get_audio_tagger():
+    global _AT
+    if _AT is not None:
+        return _AT
 
-    total = float(np.sum(mag))
-    centroid = float(np.sum(freqs * mag) / total)
+    # CPU only (simple + stable)
+    device = "cpu"
+    _AT = AudioTagging(checkpoint_path=None, device=device)
+    return _AT
 
-    # ratio énergie basse fréquence (<400 Hz)
-    low_mask = freqs < 400.0
-    low_ratio = float(np.sum(mag[low_mask]) / total)
 
-    # Heuristiques:
-    # - ronflement: très basse fréquence + peu de zcr
-    # - parole: VAD élevé + centroid plus haut + zcr plus haut
-    # - sinon: bruit
-    if low_ratio > 0.70 and centroid < 450.0 and zcr < 0.10:
-        sound_type = "snore"
-    elif voiced_ratio > 0.35 and centroid > 600.0 and zcr >= 0.10:
-        sound_type = "voice"
-    else:
-        sound_type = "noise"
+def _max_prob_for_keywords(probs: np.ndarray, keywords: list[str]) -> float:
+    """
+    probs: (527,) float
+    keywords: substrings (lowercase)
+    """
+    best = 0.0
+    for i, lbl in enumerate(PANNS_LABELS):
+        ll = lbl.lower()
+        if any(k in ll for k in keywords):
+            p = float(probs[i])
+            if p > best:
+                best = p
+    return best
 
-    return {
-        "activity": True,
-        "sound_type": sound_type,
-        "voiced_ratio": float(voiced_ratio),
-        "rms": rms,
-        "zcr": zcr,
-        "centroid": centroid,
-        "low_ratio": low_ratio,
-    }
+
+def classify_with_panns(sr: int, x_i16: np.ndarray) -> dict:
+    """
+    Retourne sound_type in {"voice","snore","noise","silence"} + scores.
+    PANNs attend un signal float32 mono à 32k.
+    """
+    if len(x_i16) == 0:
+        return {"sound_type": "silence", "scores": {}}
+
+    # resample -> 32k
+    if sr != 32000:
+        x_i16 = _resample_linear(x_i16, sr, 32000)
+        sr = 32000
+
+    # int16 -> float32 [-1..1]
+    audio = (x_i16.astype(np.float32) / 32768.0)[None, :]  # (1, N)
+
+    at = _get_audio_tagger()
+
+    with torch.inference_mode():
+        clipwise_output, _ = at.inference(audio)  # (1, 527)
+
+    probs = clipwise_output[0]  # (527,)
+    # mapping robuste via keywords (pas dépendant des labels exacts)
+    p_voice = _max_prob_for_keywords(probs, ["speech", "conversation", "narration", "talk", "voice"])
+    p_snore = _max_prob_for_keywords(probs, ["snor"])  # "snoring" etc
+    # bruit : tout sauf parole/ronflement, on prend un “proxy”
+    # (si ni voice ni snore dominent, on classe bruit)
+    scores = {"voice": p_voice, "snore": p_snore}
+
+    # thresholds (à ajuster selon ton micro/environnement)
+    if p_snore >= 0.25 and p_snore >= p_voice:
+        return {"sound_type": "snore", "scores": scores}
+    if p_voice >= 0.30 and p_voice >= p_snore:
+        return {"sound_type": "voice", "scores": scores}
+    return {"sound_type": "noise", "scores": scores}
 
 
 def _auto_tag_from_sound(sound_type: str) -> str:
@@ -273,41 +274,52 @@ def _auto_tag_from_sound(sound_type: str) -> str:
     return "Non tagué"
 
 
+def analyze_audio(path: Path) -> dict:
+    sr, x = _read_wav_pcm16(path)
+
+    voiced_ratio = vad_activity(sr, x)
+    activity = voiced_ratio >= 0.08
+
+    if not activity:
+        return {"activity": False, "sound_type": "silence", "voiced_ratio": float(voiced_ratio), "scores": {}}
+
+    # activité détectée -> classification pretrained
+    cls = classify_with_panns(sr, x)
+    return {
+        "activity": True,
+        "sound_type": cls["sound_type"],
+        "voiced_ratio": float(voiced_ratio),
+        "scores": cls.get("scores", {}),
+    }
+
+
 # -------------------------
 # Worker thread
 # -------------------------
 
 def processing_worker():
-    """
-    Passe chaque fichier 1 seule fois:
-    - si processing_status == unprocessed -> processing -> done/error
-    - ne touche pas aux tags manuels
-    """
     print("[VAD] worker started")
     while True:
         try:
-            entries = [p for p in REC_DIR.iterdir() if p.is_file() and p.suffix.lower() == ".wav"]
+            wavs = [p for p in REC_DIR.iterdir() if p.is_file() and p.suffix.lower() == ".wav"]
         except FileNotFoundError:
-            entries = []
+            wavs = []
 
         meta = _load_meta()
         dirty = False
 
-        # 1) s'assurer que tous les fichiers ont une entrée meta
-        for p in entries:
+        for p in wavs:
             if p.name not in meta:
                 st = p.stat()
                 _ensure_meta_entry(meta, p.name, recorded_at=int(st.st_mtime))
                 dirty = True
-
         if dirty:
             _save_meta(meta)
 
-        # 2) trouver un job unprocessed
         job = None
-        for p in entries:
-            entry = meta.get(p.name) or {}
-            if entry.get("processing_status") == STATUS_UNPROCESSED:
+        for p in wavs:
+            stt = (meta.get(p.name) or {}).get("processing_status", STATUS_UNPROCESSED)
+            if stt == STATUS_UNPROCESSED:
                 job = p
                 break
 
@@ -315,10 +327,9 @@ def processing_worker():
             time.sleep(1.5)
             continue
 
-        # 3) marquer processing (atomique via meta)
+        # mark processing
         meta = _load_meta()
         entry = _ensure_meta_entry(meta, job.name, recorded_at=int(job.stat().st_mtime))
-        # Si entre temps quelqu’un l’a déjà pris
         if entry.get("processing_status") != STATUS_UNPROCESSED:
             time.sleep(0.2)
             continue
@@ -327,7 +338,6 @@ def processing_worker():
         entry["error"] = None
         _save_meta(meta)
 
-        # 4) analyser sans lock
         try:
             res = analyze_audio(job)
 
@@ -339,16 +349,14 @@ def processing_worker():
             entry["processed_at"] = int(time.time())
             entry["processing_status"] = STATUS_DONE
             entry["error"] = None
+            entry["scores"] = res.get("scores", {})
 
-            # tag auto uniquement si pas manual
-            tag_source = entry.get("tag_source", "auto")
-            if tag_source != "manual":
-                new_tag = _auto_tag_from_sound(entry.get("sound_type") or "")
-                entry["tag"] = new_tag
+            if entry.get("tag_source", "auto") != "manual":
+                entry["tag"] = _auto_tag_from_sound(entry.get("sound_type") or "")
                 entry["tag_source"] = "auto"
 
             _save_meta(meta)
-            print(f"[VAD] done {job.name}: {entry.get('sound_type')} tag={entry.get('tag')}")
+            print(f"[VAD] done {job.name}: {entry.get('sound_type')} tag={entry.get('tag')} scores={entry.get('scores')}")
 
         except Exception as e:
             meta = _load_meta()
@@ -359,7 +367,6 @@ def processing_worker():
             _save_meta(meta)
             print(f"[VAD] error {job.name}: {e}")
 
-        # petit yield
         time.sleep(0.1)
 
 
@@ -383,7 +390,6 @@ def write_wav(path: Path, pcm_bytes: bytes, recorded_at: Optional[int] = None):
         wf.setframerate(SAMPLE_RATE)
         wf.writeframes(pcm_bytes)
 
-    # meta: recorded_at + status unprocessed
     meta = _load_meta()
     entry = _ensure_meta_entry(meta, path.name, recorded_at=int(recorded_at if recorded_at is not None else time.time()))
     entry["processing_status"] = STATUS_UNPROCESSED
@@ -412,12 +418,10 @@ def list_wavs():
 
         entry = _ensure_meta_entry(meta, p.name, recorded_at=int(st.st_mtime))
 
-        # date/time affichés
         name_date, name_time = _parse_dt_from_name(p.name)
         recorded_at = entry.get("recorded_at")
         if name_date and name_time:
             date_str, time_str = name_date, name_time
-            # migration douce: si recorded_at absent, on le remplit
             if recorded_at is None:
                 ts = _ts_from_date_time(name_date, name_time)
                 if ts is not None:
@@ -426,7 +430,6 @@ def list_wavs():
         else:
             if recorded_at is None:
                 entry["recorded_at"] = int(st.st_mtime)
-                recorded_at = entry["recorded_at"]
                 meta_dirty = True
             date_str, time_str = _date_time_from_ts(int(entry["recorded_at"]))
 
@@ -477,12 +480,9 @@ def api_rename(name: str, body: RenameBody):
     src.rename(dst)
 
     meta = _load_meta()
-
-    # déplacer la meta si elle existe
     if name in meta:
         meta[body.new_name] = meta.pop(name)
 
-    # garantir cohérence
     st = dst.stat()
     entry = _ensure_meta_entry(meta, body.new_name, recorded_at=int(st.st_mtime))
     meta[body.new_name] = entry
@@ -520,7 +520,7 @@ def api_tag(name: str, body: TagBody):
     meta = _load_meta()
     entry = _ensure_meta_entry(meta, name, recorded_at=int(p.stat().st_mtime))
     entry["tag"] = body.tag
-    entry["tag_source"] = "manual"  # IMPORTANT: le worker n'écrase plus
+    entry["tag_source"] = "manual"
     _save_meta(meta)
 
     return {"ok": True, "tag": body.tag}
@@ -556,7 +556,6 @@ def audio_tcp_server():
                 if not data:
                     break
 
-                # keep PCM aligned on 2 bytes (s16le)
                 data = carry + data
                 if len(data) % 2 == 1:
                     carry = data[-1:]
@@ -591,8 +590,8 @@ def main():
     t_audio = threading.Thread(target=audio_tcp_server, daemon=True)
     t_audio.start()
 
-    t_vad = threading.Thread(target=processing_worker, daemon=True)
-    t_vad.start()
+    t_worker = threading.Thread(target=processing_worker, daemon=True)
+    t_worker.start()
 
     uvicorn.run(app, host=API_HOST, port=API_PORT)
 
