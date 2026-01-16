@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { fetchRecordings, fmtBytes, isTail } from "./api.js";
+import WavePlayer from "./WavePlayer.jsx";
 
 export default function App() {
   const [files, setFiles] = useState([]);
@@ -164,29 +165,7 @@ export default function App() {
               <div className="now-name">{selected?.name ?? "—"}</div>
             </div>
 
-            <audio
-              id="audio"
-              className="audio"
-              controls
-              preload="metadata"
-              src={selected?.url ? selected.url : ""}
-            />
-
-            <div className="player-actions">
-              <button className="btn" type="button" onClick={() => seek(-5)}>
-                ⏪ 5s
-              </button>
-              <button
-                className="btn btn--primary"
-                type="button"
-                onClick={togglePlay}
-              >
-                ▶︎ / ⏸
-              </button>
-              <button className="btn" type="button" onClick={() => seek(5)}>
-                5s ⏩
-              </button>
-            </div>
+            <WavePlayer url={selected?.url || ""} />
           </div>
         </section>
       </main>
