@@ -21,21 +21,34 @@ nginx - Frontend React localhost
 ## Lancer
 
 ```powershell
-podman machine init
-podman machine start
-podman compose up -d --build
+sudo apt update
+sudo apt install -y git docker.io docker-compose
+sudo systemctl enable --now docker
+sudo usermod -aG docker $USER
+newgrp docker
+
+git clone https://github.com/TilioChr/SleepRecorder.git
+cd SleepRecorder
+
+cd ~/SleepRecorder
+rm -rf dist
+mkdir -p dist
+
+docker run --rm \
+  -v "$PWD/frontend:/app" \
+  -w /app \
+  node:20-alpine sh -lc "npm install && npm run build"
+
+cp -a frontend/dist/. dist/
+
+
+docker-compose up -d --build
 ```
 
 Interface :
 
 ```
 http://localhost:8080
-```
-
-Build du frontend - (obligatoire après chaque modif React)
-
-```powershell
-.\deploy.ps1
 ```
 
 Tester sans Raspberry Pi - Envoyer un WAV en PCM brut vers le backend :
